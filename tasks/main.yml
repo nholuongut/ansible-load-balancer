@@ -1,0 +1,209 @@
+---
+
+- assert:
+    that: LOAD_BALANCER_SERVER_IP | ipaddr
+    msg: "The LOAD_BALANCER_SERVER_IP variable must be an IP address, not a domain name."
+
+- name: add HAProxy PPA
+  apt_repository:
+    repo: "{{ HAPROXY_PPA }}"
+  when: HAPROXY_PPA != ""
+
+- name: install HAProxy
+  apt:
+    name: haproxy={{ HAPROXY_VERSION }}
+
+- name: install apt packages
+  apt:
+    name: "{{ LOAD_BALANCER_APT_PACKAGES }}"
+
+- name: create haproxy configuration directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+  with_items:
+    - "{{ LOAD_BALANCER_CERTS_DIR }}"
+    - "{{ LOAD_BALANCER_CONF_DIR }}"
+    - "{{ LOAD_BALANCER_BACKENDS_DIR }}"
+    - "{{ LETSENCRYPT_ARCHIVE_DIR }}"
+    - "{{ LETSENCRYPT_LIVE_DIR }}"
+
+- name: copy haproxy configuration main section
+  template:
+    src: haproxy.cfg
+    dest: "{{ LOAD_BALANCER_CONF_DIR }}/00-main"
+
+- name: create placeholder file for backend map
+  copy:
+    content: |
+      # This directory contains files mapping domain names to backend names.  Each
+      # line contains a domain name and a backend name separated by whitespace.
+    dest: "{{ LOAD_BALANCER_BACKENDS_DIR }}/00-main"
+
+# Haproxy refuses to start when there are no valid SSL certificates in the
+# /etc/haproxy/certs directory, so we copy a bogus cert there.  The snakeoil
+# certificate will never be used since we used the strict-sni option in the
+# haproxy configuration.
+- name: copy snakeoil certificate into haproxy config directory
+  shell: >
+    cat /etc/ssl/certs/ssl-cert-snakeoil.pem /etc/ssl/private/ssl-cert-snakeoil.key \
+        > {{ LOAD_BALANCER_CERTS_DIR }}/{{ LOAD_BALANCER_SNAKE_OIL_CERT }}
+  args:
+    creates: "{{ LOAD_BALANCER_CERTS_DIR }}/{{ LOAD_BALANCER_SNAKE_OIL_CERT }}"
+
+- name: copy letsencrypt staging certificate for testing purposes
+  copy:
+    src: lets-encrypt-fake-cert.crt
+    dest: "{{ LETSENCRYPT_FAKE_CERT }}"
+  when: LETSENCRYPT_USE_STAGING
+
+- name: copy helper scipts
+  template:
+    src: "{{ item }}"
+    dest: "/usr/local/sbin/{{ item }}"
+    mode: "0755"
+  with_items:
+    - cert-watcher
+    - haproxy-config
+    - haproxy-config-watcher
+    - haproxy-reload
+    - manage_certs.py
+
+- name: copy certificate management configuration file
+  template:
+    src: manage_certs.conf
+    dest: "{{ LOAD_BALANCER_MANAGE_CERTS_CONF }}"
+
+- name: copy config and cert watcher systemd service files
+  template:
+    src: "{{ item }}"
+    dest: "/lib/systemd/system/{{ item }}"
+  with_items:
+    - haproxy-config-watcher.service
+    - cert-watcher.service
+
+- name: enable and start config and cert watcher
+  systemd:
+    daemon_reload: yes
+    enabled: yes
+    state: restarted
+    name: "{{ item }}"
+  with_items:
+    - haproxy-config-watcher
+    - cert-watcher
+
+- name: set up cron job to reload haproxy when needed
+  cron:
+    name: "Reload haproxy when needed"
+    job: /usr/local/sbin/haproxy-reload
+    cron_file: haproxy-reload
+    user: root
+
+- name: set up cron job for automatic certificate management
+  cron:
+    name: "Request new certificates when needed and remove unused ones"
+    job: "/usr/local/sbin/manage_certs.py @{{ LOAD_BALANCER_MANAGE_CERTS_CONF }}"
+    cron_file: manage-certs
+    minute: "*/{{ LOAD_BALANCER_MANAGE_CERTS_INTERVAL }}"
+    user: root
+
+- name: set up cron job for certificate renewal
+  cron:
+    name: "Renew SSL certificate using the letsencrypt client"
+    # We shouldn't need to pass any parameters to "letsencrypt renew", since it
+    # reuses the parameters used when a certificate was issued for the last time.
+    # However, not passing in the port results in letsencrypt complaining about
+    # port 443 being in use.  (Seems to be a bug in certbot.)
+    job: "letsencrypt renew --standalone-supported-challenges http-01 --http-01-port 8080 -q"
+    hour: "*/12"
+    minute: 42
+    cron_file: letsencrypt-renew
+    user: root
+
+- name: Install maintenance backend config
+  template:
+    src: haproxy-maintenance-backends.conf
+    dest: "{{ LOAD_BALANCER_CONF_DIR }}/01-maintenance"
+
+- name: Ensure that {{ MAINTENANCE_SERVER_STATIC_ROOT }} exists
+  file:
+    path: "{{ MAINTENANCE_SERVER_STATIC_ROOT }}"
+    owner: www-data
+    group: www-data
+    state: directory
+
+- name: Copy Nginx site configuration
+  template:
+    src: nginx-maintenance.conf
+    dest: /etc/nginx/sites-available/maintenance
+  notify:
+    - reload nginx
+
+- name: Enable Nginx config
+  file:
+    src: /etc/nginx/sites-available/maintenance
+    dest: /etc/nginx/sites-enabled/maintenance
+    state: link
+  notify:
+    - reload nginx
+
+- name: Install maintenance content
+  git:
+    repo: "{{ MAINTENANCE_PAGES_REPO }}"
+    dest: "{{ MAINTENANCE_SERVER_STATIC_ROOT }}/default"
+
+- name: open HTTP and HTTPS port on the firewall
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  with_items:
+    - 80
+    - 443
+
+- name: restart haproxy
+  command: /usr/local/sbin/haproxy-reload -f
+
+# Ensures that haproxy logs to /var/log
+- name: restart rsyslog
+  service:
+    name: rsyslog
+    state: restarted
+
+# Ensure that the certificate for the main domain name of the server is created
+# immediately.  It's needed by the role to install the node exporter.
+- name: run certificate management script
+  command: "/usr/local/sbin/manage_certs.py @{{ LOAD_BALANCER_MANAGE_CERTS_CONF }}"
+  args:
+    creates: "/etc/letsencrypt/live/{{ LOAD_BALANCER_MAIN_DOMAIN }}"
+
+- name: Install Prometheus HAProxy exporter
+  when: haproxy_exporter_enabled
+  block:
+
+    - name: Download HAProxy exporter
+      unarchive:
+        src: "{{ haproxy_exporter_download_url }}"
+        remote_src: yes
+        dest: /opt
+        creates: "{{ haproxy_exporter_binary }}"
+
+    - name: Copy HAProxy exporter service definition
+      template:
+        src: haproxy-exporter.service.j2
+        dest: /etc/systemd/system/haproxy-exporter.service
+
+    - name: Start HAProxy exporter
+      systemd:
+        daemon-reload: yes
+        name: haproxy-exporter.service
+        state: started
+        enabled: yes
+
+    - name: Create Consul service definition file
+      copy:
+        content: "{{ haproxy_exporter_consul_service | to_nice_json }}"
+        dest: /etc/consul/haproxy-exporter.json
+      notify:
+        - reload consul

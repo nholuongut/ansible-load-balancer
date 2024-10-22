@@ -1,0 +1,68 @@
+---
+
+LOAD_BALANCER_SERVER_IP: "{{ ansible_host }}"
+LOAD_BALANCER_MAIN_DOMAIN: "{{ inventory_hostname }}"
+
+LOAD_BALANCER_OPS_EMAIL: ops@example.com
+
+HAPROXY_PPA: "ppa:vbernat/haproxy-1.8"
+
+HAPROXY_VERSION: "1.8.*"
+
+LOAD_BALANCER_APT_PACKAGES:
+  - letsencrypt
+  - inotify-tools
+  - python3-openssl
+  - socat
+  - ssl-cert
+
+LOAD_BALANCER_CERTS_DIR: /etc/haproxy/certs
+LOAD_BALANCER_CONF_DIR: /etc/haproxy/conf.d
+LOAD_BALANCER_BACKENDS_DIR: /etc/haproxy/backends
+LETSENCRYPT_ARCHIVE_DIR: /etc/letsencrypt/archive
+LETSENCRYPT_LIVE_DIR: /etc/letsencrypt/live
+LOAD_BALANCER_BACKEND_MAP: /etc/haproxy/backend.map
+
+# Path of file used as indicator that haproxy needs to be reloaded.
+LOAD_BALANCER_RELOAD_FILE: /tmp/haproxy-needs-reload
+
+# Whether to use the Let's Encrypt staging server to get certificates.  Enable
+# this for testing to save resources.  The issued certificates won't be
+# accepted by browsers.
+LETSENCRYPT_USE_STAGING: false
+
+LETSENCRYPT_FAKE_CERT: /etc/ssl/certs/letsencrypt-fake-cert.crt
+
+LOAD_BALANCER_MANAGE_CERTS_CONF: /etc/manage_certs.conf
+LOAD_BALANCER_MANAGE_CERTS_LOG_LEVEL: info
+LOAD_BALANCER_SNAKE_OIL_CERT: ssl-cert-snakeoil.pem
+
+# The interval between invocations of manage_certs.py in minutes.
+LOAD_BALANCER_MANAGE_CERTS_INTERVAL: 5
+
+# Configuration for Nginx server serving maintenance pages.
+MAINTENANCE_SERVER_PORT: 8888
+MAINTENANCE_SCHEDULED_SERVER_PORT: "{{ MAINTENANCE_SERVER_PORT + 1 }}"
+MAINTENANCE_UNSCHEDULED_SERVER_PORT: "{{ MAINTENANCE_SERVER_PORT + 2 }}"
+MAINTENANCE_PROVISIONING_SERVER_PORT: "{{ MAINTENANCE_SERVER_PORT + 3 }}"
+MAINTENANCE_SERVER_STATIC_ROOT: /var/www/maintenance
+MAINTENANCE_PAGES_REPO: "https://github.com/open-craft/maintenance-pages"
+
+# PROMETHEUS ##################################################################
+
+haproxy_exporter_enabled: false
+haproxy_exporter_version: 0.9.0
+haproxy_exporter_basename: "haproxy_exporter-{{ haproxy_exporter_version }}.linux-amd64"
+haproxy_exporter_binary: "/opt/{{ haproxy_exporter_basename }}/haproxy_exporter"
+haproxy_exporter_archive: "{{ haproxy_exporter_basename }}.tar.gz"
+haproxy_exporter_download_url: "https://github.com/prometheus/haproxy_exporter/releases/download/v{{ haproxy_exporter_version }}/{{ haproxy_exporter_archive }}"
+haproxy_exporter_password: null
+
+haproxy_exporter_consul_service:
+  service:
+    name: haproxy-exporter
+    tags:
+      - haproxy-exporter
+      - monitor-https
+    port: 19101
+    enable_tag_override: true
